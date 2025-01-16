@@ -30,7 +30,7 @@ config = yaml.safe_load(open("config.yml"))
 
 logging.basicConfig(level=logging.INFO,format='[%(asctime)s] [%(name)s] [%(levelname)s]: %(message)s')
 skycloudlogger = logging.getLogger("SkyCloud")
-skycloudlogger.info("Starting SkyCloud Server...")
+skycloudlogger.info("Starting SkyCloud Server")
 
 authhandler = AuthHandler(config["database"]["file"])
 
@@ -46,13 +46,17 @@ serialized_public_key = public_key.public_bytes(
     encoding=serialization.Encoding.PEM,
     format=serialization.PublicFormat.SubjectPublicKeyInfo
 )
-skycloudlogger.info("Generated RSA keys beginning to start server...")
+skycloudlogger.info("Generated RSA keys")
 
-def handler(websocket):
-    # Step 1: Send the server's public RSA key to the client
-    websocket.send(json.dumps({"type": "public_key", "key": serialized_public_key.decode()}))
+def handler(websocket: ServerConnection):
+    # Send initial handshake
+    websocket.send(json.dumps({"type": "handshake", "version": version, "motd": motd}))
+    websocket.logger.info(f"Connection Established to {websocket.remote_address}")
 
-    # Step 2: Receive the encrypted symmetric key from the client
+    # Send public key
+    websocket.send(json.dumps({"type": "handshake", "key": serialized_public_key.decode()}))
+
+    # Receive encrypted symmetric key
     encrypted_symmetric_key = websocket.recv()
     symmetric_key = private_key.decrypt(
         encrypted_symmetric_key,
@@ -62,11 +66,24 @@ def handler(websocket):
             label=None
         )
     )
-
-    # Step 3: Initialize the Fernet cipher with the symmetric key
     cipher = Fernet(symmetric_key)
 
-    # Step 4: Encrypt and send a handshake message to the client
-    handshake_message = json.dumps({"type": "handshake", "version": version, "motd": motd})
-    encrypted_message = cipher.encrypt(handshake_message.encode())
-    websocket.send(encrypted_message)
+    def send(data):
+        encrypted_message = cipher.encrypt(data.encode())
+        websocket.send(encrypted_message)
+
+    def recv():
+        encrypted_message = websocket.recv()
+        return json.loads(cipher.decrypt(encrypted_message).decode())
+
+    # Receive encryption test
+    test = recv()
+    if test["type"] == "encryption_test" and test["msg"] == "test":
+        # Respond to encryption test
+        send(json.dumps({"type": "encryption_test", "msg": "success"}))
+    
+    
+      
+server = serve(handler=handler,host=host, port=port, logger=logging.getLogger("Server"))
+skycloudlogger.info(f"Server started on {host}:{port}")
+server.serve_forever()

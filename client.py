@@ -4,19 +4,28 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import serialization, hashes
 from websockets.sync.client import connect
+import logging
 
-def client_handler(uri):
-    with connect(uri) as websocket:
-        # Step 1: Receive the server's public RSA key
-        public_key_message = websocket.recv()
+class SkyCloudClient:
+    def __init__(self,host,port=3127,ssl=None):
+        if ssl == None:
+            self.uri = f"ws://{host}:{port}"
+        else:
+            self.uri = f"wss://{host}:{port}"
+        
+        self.websocket = connect(self.uri,ssl=ssl)
+        # Receive initial handshake
+        handshake = json.loads(self.websocket.recv())
+        print(f"Handshake received: Version {handshake['version']}, MOTD: {handshake['motd']}")
+
+        # Receive public key
+        public_key_message = self.websocket.recv()
         public_key_data = json.loads(public_key_message)
         server_public_key = serialization.load_pem_public_key(public_key_data['key'].encode())
 
-        # Step 2: Generate a symmetric Fernet key
+        # Generate symmetric key and send encrypted key
         symmetric_key = Fernet.generate_key()
-        cipher = Fernet(symmetric_key)
-
-        # Step 3: Encrypt the symmetric key using the server's public key
+        self.cipher = Fernet(symmetric_key)
         encrypted_symmetric_key = server_public_key.encrypt(
             symmetric_key,
             padding.OAEP(
@@ -25,27 +34,23 @@ def client_handler(uri):
                 label=None
             )
         )
+        self.websocket.send(encrypted_symmetric_key)
 
-        # Step 4: Send the encrypted symmetric key to the server
-        websocket.send(encrypted_symmetric_key)
+        # Send encryption test
+        self._send(json.dumps({"type": "encryption_test", "msg": "test"}))
+        print("Sent encryption test")
 
-        # Step 5: Receive and decrypt the handshake message from the server
-        encrypted_message = websocket.recv()
-        decrypted_message = cipher.decrypt(encrypted_message)
-        print(f"Decrypted server message: {decrypted_message.decode()}")
-
-def run_client():
-    """Thread function to run the client."""
-    print("Starting client...")
-    client_handler("ws://localhost:8765")
-
-if __name__ == "__main__":
-    # Create a thread to run the client
-    client_thread = threading.Thread(target=run_client)
-    client_thread.start()
-
-    # Main thread can perform other tasks here if needed
-    print("Main thread is free to do other tasks while the client runs in the background.")
-
-    # Optionally join the thread to wait for it to complete
-    client_thread.join()
+        # Receive and verify encryption test response
+        response = self._recv()
+        if response["type"] == "encryption_test" and response["msg"] == "success!":
+            print("Encryption test passed. Connection established.")
+        else:
+            raise ValueError("Encryption test failed!")
+        
+    def _send(self,data):
+        self.websocket.send(self.cipher.encrypt(data))
+        
+    def _recv(self):
+        return self.cipher.decrypt(self.websocket.recv())
+        
+client = SkyCloudClient("localhost")
