@@ -17,13 +17,20 @@ server:
   motd: "Skycloud Server"
   port: 3127
   maxconnections: 10
+  compression: true
+
+authorization:
+  use_key_based_signin: true
 
 database:
-  file: "./skycloud.db"
+  type: "sqlite"
+  path: "./skycloud.db"
 
 logging:
   level: "INFO"
-  file: "./skycloud.log"
+  path: "./skycloud.log"
+  
+
 """)
 
 config = yaml.safe_load(open("config.yml"))
@@ -32,13 +39,28 @@ logging.basicConfig(level=logging.INFO,format='[%(asctime)s] [%(name)s] [%(level
 skycloudlogger = logging.getLogger("SkyCloud")
 skycloudlogger.info("Starting SkyCloud Server")
 
-authhandler = AuthHandler(config["database"]["file"])
+if config["database"]["type"]:
+    database = sqlite3.connect(config["database"]["path"])
+else:
+    skycloudlogger.fatal("Database Type is not supported!",exc_info=True)
+    sys.exit(1)
+
+authhandler = AuthHandler(database)
+
+databaseempty = False
+if authhandler.is_empty():
+    skycloudlogger.warning("Your user database is empty. Your server will request a user register upon connection")
+    databaseempty = True
 
 version = 1.0
 motd = config["server"]["motd"]
 port = config["server"]["port"]
 host = config["server"]["host"]
 maxconnections = config["server"]["maxconnections"]
+compression = config["server"]["compression"]
+signinmethods = ["signin"]
+if config["authorization"]["use_key_based_signin"]:
+    signinmethods.append("rsakey")
 
 private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 public_key = private_key.public_key()
@@ -53,10 +75,8 @@ def handler(websocket: ServerConnection):
     websocket.send(json.dumps({"type": "handshake", "version": version, "motd": motd}))
     websocket.logger.info(f"Connection Established to {websocket.remote_address}")
 
-    # Send public key
-    websocket.send(json.dumps({"type": "handshake", "key": serialized_public_key.decode()}))
+    websocket.send(json.dumps({"type": "encryption", "key": serialized_public_key.decode()}))
 
-    # Receive encrypted symmetric key
     encrypted_symmetric_key = websocket.recv()
     symmetric_key = private_key.decrypt(
         encrypted_symmetric_key,
@@ -76,13 +96,14 @@ def handler(websocket: ServerConnection):
         encrypted_message = websocket.recv()
         return json.loads(cipher.decrypt(encrypted_message).decode())
 
-    # Receive encryption test
     test = recv()
     if test["type"] == "encryption_test" and test["msg"] == "test":
-        # Respond to encryption test
         send(json.dumps({"type": "encryption_test", "msg": "success"}))
     
-    
+    if authhandler.is_empty():
+        send(json.dumps({"type":"signin","signin_methods":signinmethods}))
+    else:
+        send(json.dumps({"type":"signin","signin_methods":signinmethods}))
       
 server = serve(handler=handler,host=host, port=port, logger=logging.getLogger("Server"))
 skycloudlogger.info(f"Server started on {host}:{port}")
