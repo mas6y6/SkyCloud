@@ -1,13 +1,13 @@
 import cryptography, asyncio, json, os, sys, time, requests, random, string, lzma
-from websockets.sync.server import serve, ServerConnection
-import logging, yaml, sqlite3, bcrypt, uuid
+from websockets.asyncio.server import serve, ServerConnection
+import logging, yaml, sqlite3, bcrypt, uuid, asyncio
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
 from skycloud.auth import AuthHandler
 
 if not os.path.exists("./config.yml"):
-    print("Configfile not found creating new one")
+    print("config.yml not found creating new one")
     with open("config.yml", "w") as f:
         f.write("""configversion: 1
 # Do not change this value
@@ -35,7 +35,7 @@ logging:
 
 config = yaml.safe_load(open("config.yml"))
 
-logging.basicConfig(level=logging.INFO,format='[%(asctime)s] [%(name)s] [%(levelname)s]: %(message)s')
+logging.basicConfig(level=logging.INFO,format='[%(asctime)s] [%(levelname)s] [%(name)s]: %(message)s')
 skycloudlogger = logging.getLogger("SkyCloud")
 skycloudlogger.info("Starting SkyCloud Server")
 
@@ -70,14 +70,15 @@ serialized_public_key = public_key.public_bytes(
 )
 skycloudlogger.info("Generated RSA keys")
 
-def handler(websocket: ServerConnection):
-    websocket.send(json.dumps({"type": "handshake", "version": version, "motd": motd,"compression":compression}))
-    websocket.logger.info(f"Connection Established to {websocket.remote_address}")
+async def handler(websocket: ServerConnection):
+    logger = logging.getLogger(f"ConnectionHandler ({websocket.remote_address})")
+    logger.info(f"Connection Established from {websocket.remote_address}")
+    await websocket.send(json.dumps({"type": "handshake", "version": version, "motd": motd,"compression":compression}))
+    await websocket.send(json.dumps({"type": "encryption", "key": serialized_public_key.decode()}))
 
-    websocket.send(json.dumps({"type": "encryption", "key": serialized_public_key.decode()}))
-
+    logger.info("Encrypting connection")
     session = None
-    encrypted_symmetric_key = websocket.recv()
+    encrypted_symmetric_key = await websocket.recv()
     symmetric_key = private_key.decrypt(
         encrypted_symmetric_key,
         padding.OAEP(
@@ -88,29 +89,32 @@ def handler(websocket: ServerConnection):
     )
     cipher = Fernet(symmetric_key)
 
-    def send(data):
+    async def send(data):
         encrypted_message = cipher.encrypt(data.encode())
-        websocket.send(encrypted_message)
+        await websocket.send(encrypted_message)
 
-    def recv():
-        encrypted_message = websocket.recv()
-        return json.loads(cipher.decrypt(encrypted_message).decode())
+    async def recv():
+        encrypted_message = await websocket.recv()
+        return cipher.decrypt(encrypted_message).decode()
 
-    test = recv()
+    test = await json.dumps(recv())
     if test["type"] == "encryption_test" and test["msg"] == "test":
-        send(json.dumps({"type": "encryption_test", "msg": "success"}))
+        await send(json.dumps({"type": "encryption_test", "msg": "success"}))
     
     if authhandler.is_empty():
-        send(json.dumps({"type":"register"}))
+        await send(json.dumps({"type":"register"}))
     else:
-        send(json.dumps({"type":"signin","methods":signinmethods}))
-        
+        await send(json.dumps({"type":"signin","methods":signinmethods}))
+    logger.info("Encryption Successful")
+    
     while session == None:
-        signin_data = json.loads(recv())
-        if signin_data["methods"]:
-            pass
+        signin_data = await json.loads(recv())
+        signin_data
             
-      
-server = serve(handler=handler,host=host, port=port, logger=logging.getLogger("Server"))
-skycloudlogger.info(f"Server started on {host}:{port}")
-server.serve_forever()
+
+async def main():
+    server = await serve(handler=handler,host=host, port=port, logger=logging.getLogger("WebsocketLogger"))
+    await asyncio.get_running_loop().create_future()
+    
+if __name__ == "__main__":
+    asyncio.run(main())

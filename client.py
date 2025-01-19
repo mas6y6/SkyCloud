@@ -112,6 +112,8 @@ class SkyCloudClient:
     def signin(self, user, password):
         if not "signin" in self.signin_methods:
             raise RuntimeError("Server does not support normal Sign in method")
+        
+        self._send({"type":"signin/select"})
 
 
 client = SkyCloudClient("127.0.0.1",keepalive=True)

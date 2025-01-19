@@ -6,36 +6,43 @@ import time
 import logging
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes, serialization
+from .permissions import Permissions, PERMISSIONS
 
 class Session:
-    def __init__(self,username,time,sessionid):
+    def __init__(self,username,time,sessionid,permissions: Permissions):
         self.username = username
         self.time = time
         self.uuid = sessionid
+        self.permissions = permissions
+        self.alive = True
         
     def tick(self):
-        self.time -= 1
+        if self.time == 1:
+            self.alive = False
+        else:
+            self.time -= 1
     
     def renew(self):
         self.time = 3600
 
 class AuthHandler:
-    def __init__(self, conn):
+    def __init__(self, conn: sqlite3.Connection):
         self.logger = logging.getLogger("AuthHandler")
         self.sessions = {}
         self.logger.info("Initializing SkyCloud AuthHandler")
 
         self.conn = conn
-        self.cursor = self.conn.cursor()
 
         try:
-            self.cursor.execute('''
+            cursor = self.conn.cursor()
+            cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 uuid TEXT UNIQUE NOT NULL,
                 username TEXT NOT NULL,
                 password TEXT,
-                public_key TEXT
+                public_key TEXT,
+                permissions TEXT NOT NULL
             )
             ''')
         except Exception as e:
@@ -45,9 +52,9 @@ class AuthHandler:
         self.logger.info("SkyCloud AuthHandler ready")
         self.sessionlogger = logging.getLogger("SessionHandler")
 
-        threading.Thread(target=self.sessionhandler, daemon=True).start()
+        threading.Thread(target=self._sessionhandler, daemon=True).start()
 
-    def sessionhandler(self):
+    def _sessionhandler(self):
         self.sessionlogger.info("Started Session Handler")
         while True:
             expired_sessions = [i for i, session in self.sessions.items() if session.time < 1]
@@ -57,8 +64,9 @@ class AuthHandler:
             time.sleep(1)
 
     def user_exists(self, username):
-        self.cursor.execute('SELECT 1 FROM users WHERE username = ?', (username,))
-        return self.cursor.fetchone() is not None
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT 1 FROM users WHERE username = ?', (username,))
+        return cursor.fetchone() is not None
 
     def register_user(self, username, password=None, public_key=None):
         if self.user_exists(username):
@@ -68,7 +76,8 @@ class AuthHandler:
         hashed_password = bcrypt.hashpw(password.encode(), bcrypt.gensalt()) if password else None
         new_uuid = str(uuid.uuid4())
 
-        self.cursor.execute(
+        cursor = self.conn.cursor()
+        cursor.execute(
             'INSERT INTO users (uuid, username, password, public_key) VALUES (?, ?, ?, ?)',
             (new_uuid, username, hashed_password, public_key)
         )
@@ -78,8 +87,9 @@ class AuthHandler:
         return True
 
     def login_user(self, username, password=None, key=None):
-        self.cursor.execute('SELECT password, public_key FROM users WHERE username = ?', (username,))
-        result = self.cursor.fetchone()
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT password, public_key FROM users WHERE username = ?', (username,))
+        result = cursor.fetchone()
 
         if result is None:
             self.logger.warning("User attempted to login with invalid username")
@@ -108,7 +118,10 @@ class AuthHandler:
 
     def _create_session(self, username):
         sessionuuid = str(uuid.uuid4())
-        self.sessions[sessionuuid] = Session(username, 3600, sessionuuid)
+        cursor = self.conn.cursor()
+        cursor.excute("SELECT * FROM users WHERE uuid = ?",())
+        
+        self.sessions[sessionuuid] = Session(username, 3600, sessionuuid,perm)
         self.logger.info(f"Opened new session for user \"{username}\" under uuid \"{sessionuuid}\"")
         return self.sessions[sessionuuid]
 
@@ -123,13 +136,15 @@ class AuthHandler:
             self.logger.warning(f"Attempted to use a key for non-existent user \"{username}\".")
             return False
 
+        cursor = self.conn.cursor()
+
         # Save the public key in the database for the user
         public_key = key.public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         ).decode()
 
-        self.cursor.execute(
+        cursor.execute(
             'UPDATE users SET public_key = ? WHERE username = ?',
             (public_key, username)
         )
