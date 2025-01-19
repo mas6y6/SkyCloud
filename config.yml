@@ -1,0 +1,22 @@
+configversion: 1
+# Do not change this value
+
+server:
+  host: "localhost"
+  motd: "Skycloud Server"
+  port: 3127
+  maxconnections: 10
+  compression: true
+
+authorization:
+  use_key_based_signin: true
+
+database:
+  type: "sqlite"
+  path: "./skycloud.db"
+
+logging:
+  level: "INFO"
+  path: "./skycloud.log"
+  
+

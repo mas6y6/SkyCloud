@@ -40,7 +40,7 @@ skycloudlogger = logging.getLogger("SkyCloud")
 skycloudlogger.info("Starting SkyCloud Server")
 
 if config["database"]["type"]:
-    database = sqlite3.connect(config["database"]["path"])
+    database = sqlite3.connect(config["database"]["path"], check_same_thread=False)
 else:
     skycloudlogger.fatal("Database Type is not supported!",exc_info=True)
     sys.exit(1)
@@ -71,12 +71,12 @@ serialized_public_key = public_key.public_bytes(
 skycloudlogger.info("Generated RSA keys")
 
 def handler(websocket: ServerConnection):
-    # Send initial handshake
-    websocket.send(json.dumps({"type": "handshake", "version": version, "motd": motd}))
+    websocket.send(json.dumps({"type": "handshake", "version": version, "motd": motd,"compression":compression}))
     websocket.logger.info(f"Connection Established to {websocket.remote_address}")
 
     websocket.send(json.dumps({"type": "encryption", "key": serialized_public_key.decode()}))
 
+    session = None
     encrypted_symmetric_key = websocket.recv()
     symmetric_key = private_key.decrypt(
         encrypted_symmetric_key,
@@ -101,9 +101,15 @@ def handler(websocket: ServerConnection):
         send(json.dumps({"type": "encryption_test", "msg": "success"}))
     
     if authhandler.is_empty():
-        send(json.dumps({"type":"signin","signin_methods":signinmethods}))
+        send(json.dumps({"type":"register"}))
     else:
-        send(json.dumps({"type":"signin","signin_methods":signinmethods}))
+        send(json.dumps({"type":"signin","methods":signinmethods}))
+        
+    while session == None:
+        signin_data = json.loads(recv())
+        if signin_data["methods"]:
+            pass
+            
       
 server = serve(handler=handler,host=host, port=port, logger=logging.getLogger("Server"))
 skycloudlogger.info(f"Server started on {host}:{port}")
