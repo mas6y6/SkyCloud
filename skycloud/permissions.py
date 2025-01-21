@@ -3,7 +3,6 @@ PERMISSIONS = {
     "READ": 0,
     "WRITE": 1,
     "DELETE": 2,
-    "":4,
     "ADMIN": 4,
 }
 

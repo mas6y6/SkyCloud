@@ -109,11 +109,18 @@ class SkyCloudClient:
     def _recv(self):
         return self.cipher.decrypt(self.websocket.recv())
 
-    def signin(self, user, password):
+    def signin(self, user: str, password: str):
+        if self.status == "REGISTER":
+            raise RuntimeError("Server does not have any users registered. Please use the registeruser() method")
         if not "signin" in self.signin_methods:
             raise RuntimeError("Server does not support normal Sign in method")
+    
+    def registeruser(self, username: str, password: str):
+        if self.status == "LOGIN":
+            raise RuntimeError("Server is requesting a login.\nPlease use signin(), signin_key() methods depending if your self.signin_methods \ncontain \"signin\" for signin() and \"rsakey\" for signin_key()")
         
-        self._send({"type":"signin/select"})
-
+        self._send(json.dumps({"type":"register","username":username,"password":password}))
+        
+        json.loads(self._recv())
 
 client = SkyCloudClient("127.0.0.1",keepalive=True)

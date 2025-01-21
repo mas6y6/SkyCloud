@@ -1,15 +1,18 @@
+import threading
 import cryptography, asyncio, json, os, sys, time, requests, random, string, lzma
-from websockets.asyncio.server import serve, ServerConnection
+from websockets.asyncio.server import serve, ServerConnection, Server
 import logging, yaml, sqlite3, bcrypt, uuid, asyncio
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
-from skycloud.auth import AuthHandler
+from skycloud.auth import AuthHandler, Session
+from skycloud.permissions import Permissions, PERMISSIONS
 
 if not os.path.exists("./config.yml"):
     print("config.yml not found creating new one")
     with open("config.yml", "w") as f:
-        f.write("""configversion: 1
+        f.write(
+            """configversion: 1
 # Do not change this value
 
 server:
@@ -31,34 +34,42 @@ logging:
   path: "./skycloud.log"
   
 
-""")
+"""
+        )
 
 config = yaml.safe_load(open("config.yml"))
 
-logging.basicConfig(level=logging.INFO,format='[%(asctime)s] [%(levelname)s] [%(name)s]: %(message)s')
+logging.basicConfig(
+    level=logging.INFO, format="[%(asctime)s] [%(levelname)s] [%(name)s]: %(message)s"
+)
 skycloudlogger = logging.getLogger("SkyCloud")
 skycloudlogger.info("Starting SkyCloud Server")
 
 if config["database"]["type"]:
     database = sqlite3.connect(config["database"]["path"], check_same_thread=False)
 else:
-    skycloudlogger.fatal("Database Type is not supported!",exc_info=True)
+    skycloudlogger.fatal("Database Type is not supported!", exc_info=True)
     sys.exit(1)
 
 authhandler = AuthHandler(database)
 
 databaseempty = False
 if authhandler.is_empty():
-    skycloudlogger.warning("Your user database is empty. Your server will request a user register upon connection")
+    skycloudlogger.warning(
+        "Your user database is empty. Your server will request a user register upon connection"
+    )
     databaseempty = True
 
 version = 1.0
+server = Server
 motd = config["server"]["motd"]
 port = config["server"]["port"]
 host = config["server"]["host"]
 maxconnections = config["server"]["maxconnections"]
 compression = config["server"]["compression"]
 signinmethods = ["signin"]
+sessionthread = None
+sessionlogger = logging.getLogger("SessionHandler")
 if config["authorization"]["use_key_based_signin"]:
     signinmethods.append("rsakey")
 
@@ -66,26 +77,40 @@ private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 public_key = private_key.public_key()
 serialized_public_key = public_key.public_bytes(
     encoding=serialization.Encoding.PEM,
-    format=serialization.PublicFormat.SubjectPublicKeyInfo
+    format=serialization.PublicFormat.SubjectPublicKeyInfo,
 )
 skycloudlogger.info("Generated RSA keys")
+
 
 async def handler(websocket: ServerConnection):
     logger = logging.getLogger(f"ConnectionHandler ({websocket.remote_address})")
     logger.info(f"Connection Established from {websocket.remote_address}")
-    await websocket.send(json.dumps({"type": "handshake", "version": version, "motd": motd,"compression":compression}))
-    await websocket.send(json.dumps({"type": "encryption", "key": serialized_public_key.decode()}))
+    await websocket.send(
+        json.dumps(
+            {
+                "type": "handshake",
+                "version": version,
+                "motd": motd,
+                "compression": compression,
+            }
+        )
+    )
+    await websocket.send(
+        json.dumps({"type": "encryption", "key": serialized_public_key.decode()})
+    )
+    print(websocket.server.connections)
 
     logger.info("Encrypting connection")
     session = None
+    authstatus = "NULL"
     encrypted_symmetric_key = await websocket.recv()
     symmetric_key = private_key.decrypt(
         encrypted_symmetric_key,
         padding.OAEP(
             mgf=padding.MGF1(algorithm=hashes.SHA256()),
             algorithm=hashes.SHA256(),
-            label=None
-        )
+            label=None,
+        ),
     )
     cipher = Fernet(symmetric_key)
 
@@ -93,28 +118,102 @@ async def handler(websocket: ServerConnection):
         encrypted_message = cipher.encrypt(data.encode())
         await websocket.send(encrypted_message)
 
-    async def recv():
+    async def recv_str():
         encrypted_message = await websocket.recv()
-        return cipher.decrypt(encrypted_message).decode()
+        return str(cipher.decrypt(encrypted_message).decode())
 
-    test = await json.dumps(recv())
+    test = await json.loads(recv_str())
     if test["type"] == "encryption_test" and test["msg"] == "test":
         await send(json.dumps({"type": "encryption_test", "msg": "success"}))
-    
-    if authhandler.is_empty():
-        await send(json.dumps({"type":"register"}))
-    else:
-        await send(json.dumps({"type":"signin","methods":signinmethods}))
+
     logger.info("Encryption Successful")
-    
+    logger.info("Handshake complete. Awaiting for client to reply for sign in")
+
+    if authhandler.is_empty():
+        await send(json.dumps({"type": "register"}))
+        authstatus = "REGISTER"
+    else:
+        await send(json.dumps({"type": "signin", "methods": signinmethods}))
+        authstatus = "SIGNIN"
+
     while session == None:
-        signin_data = await json.loads(recv())
-        signin_data
-            
+        if authstatus == "REGISTER":
+            regdata = await json.loads(recv_str())
+            if regdata["type"] == "register":
+                session = authhandler.register_user(
+                    regdata["username"],
+                    password=regdata["password"],
+                    permissions=Permissions(4),
+                    websocket=websocket,
+                )
+                await send(
+                    json.dumps({"type": "auth", "sessionid": session.sessionuuid})
+                )
+            else:
+                await websocket.close(reason="ILLEGAL_OPERATION")
+        else:
+            signdata = await json.loads(str(recv_str()))
+            if signdata["type"] == "signin/signin":
+                session = authhandler.login_user(
+                    username=signdata["username"],
+                    password=signdata["password"],
+                    websocket=websocket,
+                )
+                if session == None:
+                    await send(
+                        json.dumps({"type": "msg", "message": "INVALID_CREDENTIALS"})
+                    )
+            else:
+                await websocket.close(reason="ILLEGAL_OPERATION")
+
+
+async def session_pinger():
+    sessionlogger.info("Started Session Pinger")
+    while True:
+        for i in authhandler.sessions.items():
+            s = i[1]
+            try:
+                pong_waiter = await s.websocket.ping()
+                await asyncio.wait_for(pong_waiter, timeout=20)
+            except asyncio.TimeoutError:
+                sessionlogger.warning(
+                    f"({s.websocket.remote_address}) has not responded to checkalive ping session will not be renewed"
+                )
+            except Exception as e:
+                sessionlogger.warning(
+                    f"({s.websocket.remote_address}) An error occured when pinging this client:\n{e}"
+                )
+            else:
+                s.renew()
+        await asyncio.sleep(10)
+
+
+async def session_ticker():
+    sessionlogger.info("Started Session Ticker")
+    while True:
+        for i in authhandler.sessions.items():
+            i[1].tick()
+            sessionlogger.info("TICK")
+            await asyncio.sleep(1)
+
+
+def session_ticker_starter():
+    asyncio.run(session_ticker)
+
+def session_pinger_starter():
 
 async def main():
-    server = await serve(handler=handler,host=host, port=port, logger=logging.getLogger("WebsocketLogger"))
-    await asyncio.get_running_loop().create_future()
-    
+    server = await serve(
+        handler=handler,
+        host=host,
+        port=port,
+        logger=logging.getLogger("WebsocketLogger"),
+    )
+
+    asyncio.create_task(session_pinger())
+    asyncio.create_task(session_ticker())
+
+    await server.wait_closed()
+
 if __name__ == "__main__":
     asyncio.run(main())
