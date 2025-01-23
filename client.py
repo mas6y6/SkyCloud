@@ -20,6 +20,10 @@ class SkyCloudClient:
         self.keepalivethread = threading.Thread(target=self.keepalive)
         self.status = "CONNECTING"
         self.killswitch = False
+        self.authorized = False
+        self.signin_methods = []
+        self.compression = False
+        
         try:
             self.websocket = connect(self.uri, ssl=ssl)
         except Exception as e:
@@ -55,9 +59,6 @@ class SkyCloudClient:
             raise ValueError(
                 "Encryption test failed. Terminating (Contact server admin for assistence)"
             )
-
-        self.authorized = False
-        self.signin_methods = []
 
         self._signindata = json.loads(self._recv())
         if self._signindata["type"] == "signin":
@@ -113,7 +114,11 @@ class SkyCloudClient:
         if not "signin" in self.signin_methods:
             raise RuntimeError("Server does not support normal Sign in method")
         
-        self._send({"type":"signin/select"})
+        if not self.authorized:
+            raise RuntimeError("You are already auth")
+        
+        self._send({"type":"signin/select","select":"signin"})
+        
 
 
 client = SkyCloudClient("127.0.0.1",keepalive=True)

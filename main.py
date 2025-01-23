@@ -76,7 +76,7 @@ async def handler(websocket: ServerConnection):
     await websocket.send(json.dumps({"type": "handshake", "version": version, "motd": motd,"compression":compression}))
     await websocket.send(json.dumps({"type": "encryption", "key": serialized_public_key.decode()}))
 
-    logger.info("Encrypting connection")
+    logger.info("Client accepted Handshake request.")
     session = None
     encrypted_symmetric_key = await websocket.recv()
     symmetric_key = private_key.decrypt(
@@ -107,10 +107,21 @@ async def handler(websocket: ServerConnection):
         await send(json.dumps({"type":"signin","methods":signinmethods}))
     logger.info("Encryption Successful")
     
+    signmethod = ""
     while session == None:
         signin_data = await json.loads(recv())
-        signin_data
-            
+        if signin_data["type"] == "signin/select":
+            if signin_data["select"] == "signin":
+                signinmethods = "signin"
+                break
+            elif signin_data["select"] == "rsakey":
+                signinmethods = "rsakey"
+                break
+            else:
+                pass
+                # For muliple autherzion methods from plugins
+    
+    
 
 async def main():
     server = await serve(handler=handler,host=host, port=port, logger=logging.getLogger("WebsocketLogger"))
