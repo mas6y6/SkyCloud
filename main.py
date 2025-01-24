@@ -106,7 +106,7 @@ async def handler(websocket: ServerConnection):
         json.dumps({"type": "encryption", "key": serialized_public_key.decode()})
     )
 
-    logger.info("Encrypting connection")
+    logger.info("Client accepted Handshake request.")
     session = None
     authstatus = "NULL"
     encrypted_symmetric_key = await websocket.recv()
@@ -202,8 +202,11 @@ async def session_ticker():
 #
 # - mas6y6
 
-async def start_background_tasks():
-    asyncio.create_task(session_ticker())
+def session_ticker_starter():
+    asyncio.run(session_ticker)
+
+def session_pinger_starter():
+    pass
 
 async def main():
     global server

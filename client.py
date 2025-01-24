@@ -17,6 +17,11 @@ class SkyCloudClient:
             self.uri = f"wss://{host}:{port}"
 
         self.status = "CONNECTING"
+        self.killswitch = False
+        self.authorized = False
+        self.signin_methods = []
+        self.compression = False
+        
         try:
             self.websocket = connect(self.uri, ssl=ssl)
         except Exception as e:
@@ -52,10 +57,6 @@ class SkyCloudClient:
             raise ValueError(
                 "Encryption test failed. Terminating (Contact server admin for assistence)"
             )
-
-        self.authorized = False
-        self.signin_methods = []
-        self.sessionid = None
 
         self._signindata = json.loads(self._recv())
         if self._signindata["type"] == "signin":
@@ -122,6 +123,9 @@ class SkyCloudClient:
     
     def close(self):
         self.websocket.close()
+        self._send(json.dumps({"type":"register","username":username,"password":password}))
+        
+        json.loads(self._recv())
 
 client = SkyCloudClient("127.0.0.1")
 #client.registeruser("test","test",Permissions(4))
