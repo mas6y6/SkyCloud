@@ -7,10 +7,11 @@ import logging
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes, serialization
 from .permissions import Permissions, PERMISSIONS
+from websockets.asyncio.server import ServerConnection
 
 
 class Session:
-    def __init__(self, username, time, sessionid, usernameid, permissions: Permissions, websocket):
+    def __init__(self, username, time, sessionid, usernameid, permissions: Permissions, websocket: ServerConnection):
         self.username = username
         self.usernameid = usernameid
         self.time = time
@@ -21,7 +22,10 @@ class Session:
 
     def tick(self):
         if self.time == 1:
-            self.alive = False
+            if self.websocket.state == "CLOSED":
+                self.alive = False
+            else:
+                self.time = 3600
         else:
             self.time -= 1
 
@@ -100,12 +104,8 @@ class AuthHandler:
 
         stored_password, stored_key, userid = result
 
-        if (
-            password
-            and stored_password
-            and bcrypt.checkpw(password.encode(), stored_password)
-        ):
-            return self._create_session(username,websocket)
+        if password and bcrypt.checkpw(password.encode(), stored_password):
+            return self._create_session(userid, websocket)
         elif key and stored_key:
             public_key = serialization.load_pem_public_key(stored_key.encode())
             try:
@@ -115,8 +115,8 @@ class AuthHandler:
                     padding.PKCS1v15(),
                     hashes.SHA256(),
                 )
-                return self._create_session(userid,websocket)
-            except Exception as e:
+                return self._create_session(userid, websocket)
+            except Exception:
                 self.logger.warning("Invalid key used for login")
                 return None
         else:
@@ -126,12 +126,16 @@ class AuthHandler:
     def _create_session(self, useruuid, websocket):
         sessionuuid = str(uuid.uuid4())
         cursor = self.conn.cursor()
-        cursor.excute(
-            "SELECT username, uuid, permissions FROM users WHERE uuid = ?", (useruuid)
+        cursor.execute(
+            "SELECT username, uuid, permissions FROM users WHERE uuid = ?", (useruuid,)
         )
         userdata = cursor.fetchone()
-        username, user_uuid, permissions = userdata
 
+        if userdata is None:
+            self.logger.error(f"No user found with uuid {useruuid}")
+            return None
+
+        username, user_uuid, permissions = userdata
         perm = Permissions(permissions)
 
         self.sessions[sessionuuid] = Session(
@@ -143,7 +147,7 @@ class AuthHandler:
             websocket=websocket
         )
         self.logger.info(
-            f'Opened new session for user "{useruuid}" under uuid "{sessionuuid}"'
+            f'Opened new session for user "{username}" under uuid "{sessionuuid}"'
         )
         return self.sessions[sessionuuid]
 

@@ -5,21 +5,18 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import serialization, hashes
 from websockets.sync.client import connect
-import logging
-
+from skycloud.permissions import Permissions, PERMISSIONS
 
 class SkyCloudClient:
     def __init__(
-        self, host, port=3127, ssl=None, keepalive=True, keepalive_daemon=False
+        self, host, port=3127, ssl=None
     ):
         if ssl == None:
             self.uri = f"ws://{host}:{port}"
         else:
             self.uri = f"wss://{host}:{port}"
 
-        self.keepalivethread = threading.Thread(target=self.keepalive)
         self.status = "CONNECTING"
-        self.killswitch = False
         try:
             self.websocket = connect(self.uri, ssl=ssl)
         except Exception as e:
@@ -58,6 +55,7 @@ class SkyCloudClient:
 
         self.authorized = False
         self.signin_methods = []
+        self.sessionid = None
 
         self._signindata = json.loads(self._recv())
         if self._signindata["type"] == "signin":
@@ -80,27 +78,6 @@ class SkyCloudClient:
             print(self._signindata)
             raise ConnectionError("Server sent invalid data for signin terminated.")
 
-        self.keepalivethread.daemon = keepalive_daemon
-        if keepalive:
-            self.keepalivethread.start()
-
-    def keepalive(self):
-        while not self.killswitch:
-            try:
-                self.websocket.ping()
-                time.sleep(5)  # Keepalive interval
-            except Exception as e:
-                print(f"Keepalive failed: {e}")
-                self.killswitch = True  # Exit the loop if there's an error
-                break
-
-
-    def close(self):
-        self.killswitch = True
-        if self.keepalivethread.is_alive():
-            self.keepalivethread.join()
-        self.websocket.close()
-
     def _send(self, data):
         if isinstance(data, str):
             data = data.encode('utf-8')
@@ -114,13 +91,39 @@ class SkyCloudClient:
             raise RuntimeError("Server does not have any users registered. Please use the registeruser() method")
         if not "signin" in self.signin_methods:
             raise RuntimeError("Server does not support normal Sign in method")
+        
+        self._send(json.dumps({"type":"signin/signin","username":user,"password":password}))
+        
+        auth = json.loads(self._recv())
+        if auth["type"] == "auth":
+            self.status = "AUTHORIZED"
+            self.authorized = True
+            self.sessionid = auth["sessionid"]
+            return self.sessionid
+        elif auth["type"] == "msg" and auth["message"] == "INVALID_CREDENTIALS":
+            raise ValueError("Invalid credentials")
+        else:
+            raise ValueError(f"Server responded with an unknown message: {auth}")
     
-    def registeruser(self, username: str, password: str):
+    def registeruser(self, username: str, password: str, permissions: Permissions):
         if self.status == "LOGIN":
             raise RuntimeError("Server is requesting a login.\nPlease use signin(), signin_key() methods depending if your self.signin_methods \ncontain \"signin\" for signin() and \"rsakey\" for signin_key()")
         
-        self._send(json.dumps({"type":"register","username":username,"password":password}))
+        self._send(json.dumps({"type":"register","username":username,"password":password,"permissions":permissions.bitfield}))
         
-        json.loads(self._recv())
+        auth = json.loads(self._recv())
+        if auth["type"] == "auth":
+            self.status = "AUTHORIZED"
+            self.authorized = True
+            self.sessionid = auth["sessionid"]
+            return self.sessionid
+        else:
+            raise ValueError(f"Server responded with an unknown message: {auth}")
+    
+    def close(self):
+        self.websocket.close()
 
-client = SkyCloudClient("127.0.0.1",keepalive=True)
+client = SkyCloudClient("127.0.0.1")
+#client.registeruser("test","test",Permissions(4))
+client.signin("test","test")
+client.close()

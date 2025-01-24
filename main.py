@@ -1,7 +1,13 @@
-import threading
-import cryptography, asyncio, json, os, sys, time, requests, random, string, lzma
+import websockets
+import json
+import os
+import sys
+import traceback
 from websockets.asyncio.server import serve, ServerConnection, Server
-import logging, yaml, sqlite3, bcrypt, uuid, asyncio
+import logging
+import yaml
+import sqlite3
+import asyncio
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
@@ -68,7 +74,8 @@ host = config["server"]["host"]
 maxconnections = config["server"]["maxconnections"]
 compression = config["server"]["compression"]
 signinmethods = ["signin"]
-sessionthread = None
+sessionbackgroundthreads = None
+killswitch = False
 sessionlogger = logging.getLogger("SessionHandler")
 if config["authorization"]["use_key_based_signin"]:
     signinmethods.append("rsakey")
@@ -98,7 +105,6 @@ async def handler(websocket: ServerConnection):
     await websocket.send(
         json.dumps({"type": "encryption", "key": serialized_public_key.decode()})
     )
-    print(websocket.server.connections)
 
     logger.info("Encrypting connection")
     session = None
@@ -120,14 +126,18 @@ async def handler(websocket: ServerConnection):
 
     async def recv_str():
         encrypted_message = await websocket.recv()
-        return str(cipher.decrypt(encrypted_message).decode())
+        return cipher.decrypt(encrypted_message).decode()
 
-    test = await json.loads(recv_str())
+    async def recv_bytes():
+        encrypted_message = await websocket.recv()
+        return cipher.decrypt(encrypted_message)
+
+    test = json.loads(await recv_str())
     if test["type"] == "encryption_test" and test["msg"] == "test":
         await send(json.dumps({"type": "encryption_test", "msg": "success"}))
 
     logger.info("Encryption Successful")
-    logger.info("Handshake complete. Awaiting for client to reply for sign in")
+    logger.info("Handshake complete. Starting Authorization")
 
     if authhandler.is_empty():
         await send(json.dumps({"type": "register"}))
@@ -138,12 +148,16 @@ async def handler(websocket: ServerConnection):
 
     while session == None:
         if authstatus == "REGISTER":
-            regdata = await json.loads(recv_str())
+            regdata = json.loads(await recv_str())
             if regdata["type"] == "register":
+                if authhandler.is_empty():
+                    perm = Permissions(4)
+                else:
+                    perm = Permissions(regdata["permissions"])
                 session = authhandler.register_user(
                     regdata["username"],
                     password=regdata["password"],
-                    permissions=Permissions(4),
+                    permissions=perm,
                     websocket=websocket,
                 )
                 await send(
@@ -152,57 +166,48 @@ async def handler(websocket: ServerConnection):
             else:
                 await websocket.close(reason="ILLEGAL_OPERATION")
         else:
-            signdata = await json.loads(str(recv_str()))
+            signdata = json.loads(await recv_str())
             if signdata["type"] == "signin/signin":
                 session = authhandler.login_user(
                     username=signdata["username"],
                     password=signdata["password"],
+    
                     websocket=websocket,
                 )
                 if session == None:
                     await send(
                         json.dumps({"type": "msg", "message": "INVALID_CREDENTIALS"})
                     )
+                else:
+                    await send(
+                        json.dumps({"type": "auth", "sessionid": session.sessionuuid})
+                    )
             else:
                 await websocket.close(reason="ILLEGAL_OPERATION")
 
-
-async def session_pinger():
-    sessionlogger.info("Started Session Pinger")
-    while True:
-        for i in authhandler.sessions.items():
-            s = i[1]
-            try:
-                pong_waiter = await s.websocket.ping()
-                await asyncio.wait_for(pong_waiter, timeout=20)
-            except asyncio.TimeoutError:
-                sessionlogger.warning(
-                    f"({s.websocket.remote_address}) has not responded to checkalive ping session will not be renewed"
-                )
-            except Exception as e:
-                sessionlogger.warning(
-                    f"({s.websocket.remote_address}) An error occured when pinging this client:\n{e}"
-                )
-            else:
-                s.renew()
-        await asyncio.sleep(10)
-
-
 async def session_ticker():
-    sessionlogger.info("Started Session Ticker")
-    while True:
+    while killswitch == False:
         for i in authhandler.sessions.items():
+            if i[1].alive == False:
+                i[1].close()
+                del authhandler.sessions[i[0]]
             i[1].tick()
-            sessionlogger.info("TICK")
-            await asyncio.sleep(1)
+        await asyncio.sleep(1)
 
+# From here it starts getting chaos as I am very new to asyncio so its kinda hard for me to understand
+# how to properly implement this.
+#
+# So yea please dont main the DeprecationWarning for ./SkyCloud/main.py:225
+# as I need to run background tasks for the session tickers and pingers
+#
+# - mas6y6
 
-def session_ticker_starter():
-    asyncio.run(session_ticker)
-
-def session_pinger_starter():
+async def start_background_tasks():
+    asyncio.create_task(session_ticker())
 
 async def main():
+    global server
+    await start_background_tasks()
     server = await serve(
         handler=handler,
         host=host,
@@ -210,10 +215,11 @@ async def main():
         logger=logging.getLogger("WebsocketLogger"),
     )
 
-    asyncio.create_task(session_pinger())
-    asyncio.create_task(session_ticker())
-
     await server.wait_closed()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        skycloudlogger.info("Shutdown Signal Detected. Shutting Down Server and internal threads.")
+        killswitch = True
