@@ -123,11 +123,9 @@ class SkyCloudClient:
     
     def close(self):
         self.websocket.close()
-        self._send(json.dumps({"type":"register","username":username,"password":password}))
-        
-        json.loads(self._recv())
 
 client = SkyCloudClient("127.0.0.1")
 #client.registeruser("test","test",Permissions(4))
 client.signin("test","test")
+time.sleep(10)
 client.close()

@@ -20,17 +20,8 @@ class Session:
         self.alive = True
         self.websocket = websocket
 
-    def tick(self):
-        if self.time == 1:
-            if self.websocket.state == "CLOSED":
-                self.alive = False
-            else:
-                self.time = 3600
-        else:
-            self.time -= 1
-
-    def renew(self):
-        self.time = 3600
+    def close(self):
+        self.alive = False
 
 
 class AuthHandler:

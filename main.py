@@ -75,7 +75,6 @@ maxconnections = config["server"]["maxconnections"]
 compression = config["server"]["compression"]
 signinmethods = ["signin"]
 sessionbackgroundthreads = None
-killswitch = False
 sessionlogger = logging.getLogger("SessionHandler")
 if config["authorization"]["use_key_based_signin"]:
     signinmethods.append("rsakey")
@@ -185,15 +184,6 @@ async def handler(websocket: ServerConnection):
             else:
                 await websocket.close(reason="ILLEGAL_OPERATION")
 
-async def session_ticker():
-    while killswitch == False:
-        for i in authhandler.sessions.items():
-            if i[1].alive == False:
-                i[1].close()
-                del authhandler.sessions[i[0]]
-            i[1].tick()
-        await asyncio.sleep(1)
-
 # From here it starts getting chaos as I am very new to asyncio so its kinda hard for me to understand
 # how to properly implement this.
 #
@@ -202,15 +192,8 @@ async def session_ticker():
 #
 # - mas6y6
 
-def session_ticker_starter():
-    asyncio.run(session_ticker)
-
-def session_pinger_starter():
-    pass
-
 async def main():
     global server
-    await start_background_tasks()
     server = await serve(
         handler=handler,
         host=host,
@@ -225,4 +208,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         skycloudlogger.info("Shutdown Signal Detected. Shutting Down Server and internal threads.")
-        killswitch = True
